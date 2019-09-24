@@ -1,0 +1,148 @@
+---
+title: "One Hot Encoding on Remote dB"
+output:
+  rmdformats::readthedown:
+    highlight: pygments
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_knit$set(
+     root.dir = 'C:/Users/czwea/Documents/GitHub/DeepLearning/Deep_Learning_with_R'),
+     echo = TRUE,
+     message = FALSE,
+     warning = FALSE,
+     out-width = "100%",
+     fig.align = "center"
+```
+
+# Introduction
+
+The content that follows was copied from an Ally email by Amanda Gottschall date 4/18/19.
+
+# Email
+
+Hello,
+
+I know that it’s been a while but I did want to circle back and finally share with you the custom R function I wrote to do one hot encoding on a remote data table.  You can use the function on different types of remote data (Spark, Impala, etc).  It uses functions from the cdata package which is very flexible when it comes to remote data sources.  
+
+The cdata package developers are behind the fluid data theory that seems to be taking root (even Hadley is on board despite being mocked by these people!) – they are to blame why all those easy R functions for one hot encoding are being replaced by more confusing multi-function solutions.  This group has several posts on their winvector.github.io page but I didn’t find them too useful for my situation of just doing one hot encoding.  The most useful blog post I read is from this junior data scientist (they should  take a note from him on how to explain things and provide useful examples):
+
+https://amateurdatasci.rbind.io/post/table-another-back-again-cdata/
+
+My custom function is defined below and an example of using it to loop through a set of columns follows.  Maybe it can help you out and spare you the headache this was for me.  
+
+If anyone wants, I’d  be happy to talk you through this tomorrow during our lunch and learn (since I’ve made no progress on the R course that we are actually supposed to be discussing!).  
+
+Thanks again for your help and suggestions!
+
+With appreciation,
+Amanda
+
+# Amandas Custom Function
+
+```{r}
+## Define Function for One Hot Encoding (i.e., Create Dummy Variables) in a Remote Database
+
+oneHotEncode_remoteDB <- function(databaseHandel, 
+                         databaseTableHandel, databaseTableNameQuoted, 
+                         categoricalColumn, newColumnNameSep, 
+                         valueColumn, defaultFillValue, 
+                         rowIdColumns){
+  require(cdata)
+  require(dplyr)
+  
+  ## define control table to pivot from long to wide data structure
+  controlTableOHE <- build_pivot_control_q(tableName =  databaseTableNameQuoted, 
+                                        columnToTakeKeysFrom = categoricalColumn,
+                                        columnToTakeValuesFrom = valueColumn,
+                                        my_db = databaseHandel,
+                                        sep = newColumnNameSep)
+  
+  ## pivot from long to wide data structure
+  ## create handle for new remote table (function returns table name, not its values or a handle)
+  databaseTableWideHandel <- blocks_to_rowrecs_q(tallTable = databaseTableNameQuoted,
+                                                               controlTable = controlTableOHE,
+                                                               keyColumns = rowIdColumns,
+                                                               my_db = databaseHandel,
+                                                               # showQuery = TRUE,
+                                                               # resultName = "dummy_cols_to_join_named",
+                                                               defaultValue = defaultFillValue
+  ) %>%
+    dplyr::tbl(databaseHandel, .)
+
+  ## join new dummy variables to dataframe and delete the original categorical variable
+  databaseTableHandel_dummied <- databaseTableHandel %>%
+    left_join(databaseTableWideHandel,
+              by = rowIdColumns) %>%
+    select(-one_of(categoricalColumn))
+
+  # tbl_uncache(databaseHandel, "dummy_cols_to_join_named")
+  # db_drop_table(databaseHandel, "dummy_cols_to_join_named")
+  
+  rm(databaseTableWideHandel, controlTableOHE)
+  gc()
+  
+  return(databaseTableHandel_dummied)
+}
+```
+
+# Example
+
+```{r}
+## One Hot Encoding (i.e., create dummy variables)
+
+## create a column of 1's to use as the value indicating a variable level when transposing to wider data structure
+vehicle_details_subset_clean_tbl_spark <- vehicle_details_subset_clean_tbl_spark %>%
+  mutate(indicator = 1)
+
+## copy dataframe into Spark and name the temporary Spark table
+## NOTE:  column names converted to lower case when dataframe is copied into Spark (from Impala?)
+vehicle_details_subset_clean_tbl_spark <- sdf_copy_to(sc, 
+                                                      # vehicle_details_subset_clean_tbl, 
+                                                      vehicle_details_subset_clean_tbl_spark,
+                                                      "vehicle_details_subset_clean_tbl_named", 
+                                                      overwrite = TRUE)
+# qlook(sc, "vehicle_details_subset_clean_tbl_named")
+
+varsToDummy <- c("excess_wear_flag", "cntry_built_for_cd_recode", "nvv_mileg_rng_avg_recode", "whole_clean_pct_bb_binned", 
+                 "veh_yr_old", "actual_mileg_nbr_binned", "opening_price_amt_binned", "wt_nbr_binned", 
+                 "title_state_cd", "storg_loc_state_cd", "veh_genrc_colr_desc", "interior_typ_nm", "veh_owner_cd",
+                 "drivetrain_typ_cd", "engn_typ_cd", "fuel_typ_cd", "trnsmn_typ_cd", 
+                 "veh_class_cd", "veh_make_cd", 
+                 "auctn_day_cd", "auctn_id", 
+                 "smoker_flag")
+
+for (i in varsToDummy) {
+  vehicle_details_subset_clean_tbl_spark <- oneHotEncode_remoteDB(databaseHandel = sc,
+                                                                  databaseTableHandel = vehicle_details_subset_clean_tbl_spark,
+                                                                  databaseTableNameQuoted = "vehicle_details_subset_clean_tbl_named",
+                                                                  categoricalColumn = i,
+                                                                  newColumnNameSep = "_",
+                                                                  valueColumn = "indicator",
+                                                                  defaultFillValue = 0,
+                                                                  rowIdColumns = c("auctn_itm_id", "run_id"))
+}
+rm(i)
+vehicle_details_subset_clean_tbl_spark <- vehicle_details_subset_clean_tbl_spark %>%
+  select(-indicator)
+
+## copy dataframe into Spark and name the temporary Spark table
+vehicle_details_subset_clean_dummied_tbl_spark <- sdf_copy_to(sc,
+                                                vehicle_details_subset_clean_tbl_spark,
+                                                "vehicle_details_subset_clean_dummied_tbl_named",
+                                                overwrite = TRUE)
+# qlook(sc, "vehicle_details_subset_clean_dummied_tbl_named")
+
+# drop spark temporary table created for each dummied variable
+spark_table_names <- src_tbls(sc)
+spark_dummy_table_names <- spark_table_names[!spark_table_names %in% c("vehicle_details_subset_clean_tbl_named", 
+                                                                       "vehicle_details_subset_clean_dummied_tbl_named")]
+for(i in spark_dummy_table_names){db_drop_table(sc, i)}
+```
+
+```
+
+
+```
+
